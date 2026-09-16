@@ -1,0 +1,120 @@
+<!-- about.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #282828 0%, #1a1a1a 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            color: #e8e8e8;
+            overflow: hidden;
+        }
+        .about-container {
+            background: #333333;
+            padding: 32px 40px;
+            border-radius: 16px;
+            border: 1px solid #444444;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+            max-width: 420px;
+            width: 100%;
+            text-align: center;
+        }
+        .app-icon {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 16px;
+        }
+        .about-header {
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 4px;
+            background: linear-gradient(135deg, #DE5833 0%, #FF8C42 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .about-version {
+            font-size: 13px;
+            color: #999999;
+            margin-bottom: 16px;
+        }
+        .about-author {
+            font-size: 14px;
+            color: #999999;
+            margin-bottom: 24px;
+        }
+        .about-links {
+            margin-bottom: 24px;
+        }
+        .about-links a {
+            display: inline-block;
+            font-size: 14px;
+            color: #DE5833;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        .about-links a:hover {
+            color: #FF8C42;
+        }
+        .btn-close {
+            background: linear-gradient(135deg, #DE5833 0%, #FF8C42 100%);
+            color: #ffffff;
+            border: none;
+            padding: 10px 28px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        .btn-close:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(222, 88, 51, 0.4);
+        }
+        .btn-close:active {
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+    <div class="about-container">
+        <img class="app-icon" src="../img/icon.png" alt="Duck.ai">
+        <div class="about-header"><span id="app-title"></span></div>
+        <div class="about-version">Version <span id="app-version"></span></div>
+        <div class="about-author">By <span id="app-author"></span></div>
+        <div class="about-links"><a target="_blank" rel="noopener noreferrer" href="@@BUGURL@@">Report an issue</a></div>
+        <button class="btn-close" onclick="window.close();">Close</button>
+    </div>
+    <script>
+        const { ipcRenderer } = require('electron');
+
+        // Receive metadata from main process
+        ipcRenderer.on('app-version', (event, version) => {
+            document.getElementById('app-version').innerText = version;
+        });
+        ipcRenderer.on('app-title', (event, title) => {
+            document.getElementById('app-title').innerText = title;
+        });
+        ipcRenderer.on('app-author', (event, author) => {
+            document.getElementById('app-author').innerText = author;
+        });
+        ipcRenderer.on('app-bugs-url', (event, url) => {
+            document.querySelectorAll(`a[href="@@BUGURL@@"]`).forEach(anchor => {
+                anchor.href = url;
+            });
+        });
+
+        // Request metadata from main process
+        window.onload = () => {
+            ipcRenderer.send('get-app-metadata');
+        }
+    </script>
+</body>
+</html>

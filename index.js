@@ -1,0 +1,495 @@
+const { app, BrowserWindow, screen, Tray, Menu, nativeImage, ipcMain, shell} = require('electron');
+const { join } = require('path');
+const fs = require('fs');
+const { allowedHosts } = require('./constants');
+
+let tray = null;
+let win = null;
+let autostart = false;
+let wasOffline = false;
+const appURL = 'https://duck.ai'
+const icon = nativeImage.createFromPath(join(__dirname, '/assets/img/icon.png'));
+const isTray = process.argv.includes('--tray');
+const snapPath = process.env.SNAP
+const snapUserData = process.env.SNAP_USER_DATA
+const isScreenshotMode = process.env.TEST_SCREENSHOT === '1';
+const screenshotPath = process.env.SCREENSHOT_PATH || 'screenshot.png';
+
+function initializeAutostart() {
+  if (fs.existsSync(snapUserData + '/.config/autostart/duck.ai.desktop')) {
+    console.log('Autostart file exists')
+    autostart = true;
+  } else {
+    console.log('Autostart file does not exist')
+    autostart = false;
+  }
+}
+
+function handleAutoStartChange() {
+  if (autostart) {
+    console.log("Enabling autostart");
+    if (!fs.existsSync(snapUserData + '/.config/autostart')) {
+      fs.mkdirSync(snapUserData + '/.config/autostart', { recursive: true });
+    }
+    if (!fs.existsSync(snapUserData + '/.config/autostart/duck.ai.desktop')) {
+      fs.copyFileSync(snapPath + '/com.github.kenvandine.duck.ai-autostart.desktop', snapUserData + '/.config/autostart/duck.ai.desktop');
+    }
+  } else {
+    console.log("Disabling autostart");
+    if (fs.existsSync(snapUserData + '/.config/autostart/duck.ai.desktop')) {
+      fs.rmSync(snapUserData + '/.config/autostart/duck.ai.desktop');
+    }
+  }
+}
+
+// IPC listeners (registered once, outside createWindow to avoid leaks)
+ipcMain.on('zoom-in', () => {
+  if (!win || win.isDestroyed()) return;
+  console.log('zoom-in');
+  const currentZoom = win.webContents.getZoomLevel();
+  win.webContents.setZoomLevel(currentZoom + 1);
+});
+
+ipcMain.on('zoom-out', () => {
+  if (!win || win.isDestroyed()) return;
+  console.log('zoom-out');
+  const currentZoom = win.webContents.getZoomLevel();
+  win.webContents.setZoomLevel(currentZoom - 1);
+});
+
+ipcMain.on('zoom-reset', () => {
+  if (!win || win.isDestroyed()) return;
+  console.log('zoom-reset');
+  win.webContents.setZoomLevel(0);
+});
+
+ipcMain.on('log-message', (event, message) => {
+  console.log('Log from preload: ', message);
+});
+
+// Open links with default browser
+ipcMain.on('open-external-link', (event, url) => {
+  console.log('open-external-link: ', url);
+  
+  if (typeof url !== 'string') {
+    console.warn('open-external-link: invalid URL value');
+    return;
+  }
+
+  try {
+    const parsedUrl = new URL(url);
+    const allowedProtocols = ['http:', 'https:'];
+
+    // Ensure the URL is absolute (has origin)
+    if (!parsedUrl.origin || parsedUrl.origin === 'null') {
+      console.warn('open-external-link: blocked relative or opaque URL');
+      return;
+    }
+
+    if (!allowedProtocols.includes(parsedUrl.protocol)) {
+      console.warn(`open-external-link: blocked URL with disallowed protocol: ${parsedUrl.protocol}`);
+      return;
+    }
+
+    shell.openExternal(url).catch((err) => {
+      console.error('Failed to open external URL:', url, err);
+    });
+  } catch (err) {
+    console.warn('open-external-link: failed to parse URL', err);
+  }
+});
+
+// Retry connection from offline page
+ipcMain.on('retry-connection', () => {
+  if (!win || win.isDestroyed()) return;
+  console.log('Retrying connection...');
+  wasOffline = false;
+  win.loadURL(appURL);
+});
+
+// Listen for network status updates from the preload script
+// Only act on transitions to avoid reload loops
+ipcMain.on('network-status', (event, isOnline) => {
+  if (!win || win.isDestroyed()) return;
+  console.log(`Network status: ${isOnline ? 'online' : 'offline'}`);
+  if (isOnline && wasOffline) {
+    wasOffline = false;
+    win.loadURL(appURL);
+  } else if (!isOnline && !wasOffline) {
+    wasOffline = true;
+    win.loadFile(join(__dirname, 'assets', 'html', 'offline.html'));
+  }
+});
+
+function createWindow () {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { x, y, width, height } = primaryDisplay.bounds;
+
+  // Log geometry information for easier debugging
+  console.log(`Primary Screen Geometry - Width: ${width} Height: ${height} X: ${x} Y: ${y}`);
+
+  win = new BrowserWindow({
+    width: isScreenshotMode ? 1920 : width * 0.6,
+    height: isScreenshotMode ? 1080 : height * 0.8,
+    x: isScreenshotMode ? undefined : x + ((width - (width * 0.6)) / 2),
+    y: isScreenshotMode ? undefined : y + ((height - (height * 0.8)) / 2),
+    icon: icon,
+    show: isScreenshotMode ? false : !isTray, // Start hidden if --tray or screenshot mode
+    webPreferences: {
+      preload: join(__dirname, 'preload.js'),
+      nodeIntegration: true,
+      contextIsolation: true,
+      sandbox: false
+    }
+  });
+
+  win.removeMenu();
+
+  win.on('close', (event) => {
+    if (isScreenshotMode) return;
+    // Se houver tray, apenas esconde a janela (comportamento original).
+    // Se nao houver tray, permite fechar o app de verdade.
+    if (tray) {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+
+  win.loadURL(appURL);
+
+  // Show offline page if the URL fails to load (e.g. no internet)
+  win.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // Only handle failures for the main frame and ignore benign abort errors (e.g. ERR_ABORTED = -3)
+    if (!isMainFrame) {
+      return;
+    }
+
+    const isAbortError =
+      errorCode === -3 || (typeof errorDescription === 'string' && errorDescription.includes('ERR_ABORTED'));
+    if (isAbortError) {
+      return;
+    }
+
+    console.log(`did-fail-load: ${errorDescription} (${errorCode}) on ${validatedURL}`);
+
+    if (isScreenshotMode) {
+      setTimeout(async () => {
+        try {
+          const image = await win.capturePage();
+          fs.writeFileSync(screenshotPath, image.toPNG());
+          console.log(`Screenshot of error state saved to ${screenshotPath}`);
+        } catch (error) {
+          console.error('Error capturing error screenshot:', error);
+        }
+        app.exit(1);
+      }, 2000);
+      return;
+    }
+
+    wasOffline = true;
+    win.loadFile(join(__dirname, 'assets', 'html', 'offline.html'));
+  });
+
+  // Intercept navigation and only allow app + auth hosts in-app
+  win.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsedUrl = new URL(url);
+      const targetHost = parsedUrl.hostname;
+      const protocol = parsedUrl.protocol;
+
+      // Allow file:// protocol only for the offline page
+      if (protocol === 'file:') {
+        const { fileURLToPath } = require('url');
+        const { normalize } = require('path');
+        const offlinePath = normalize(join(__dirname, 'assets', 'html', 'offline.html'));
+        
+        try {
+          const requestedPath = normalize(fileURLToPath(parsedUrl));
+          if (requestedPath === offlinePath) {
+            console.log('will-navigate: allowing offline page');
+            return;
+          }
+        } catch (pathError) {
+          console.error('Failed to resolve file path in will-navigate:', pathError);
+        }
+        
+        console.log('Blocked will-navigate to unauthorized file:// URL');
+        event.preventDefault();
+        return;
+      }
+
+      if (!allowedHosts.has(targetHost)) {
+        // Only open well-formed http/https URLs externally
+        if (protocol === 'http:' || protocol === 'https:') {
+          console.log('will-navigate external: ', url);
+          event.preventDefault();
+          shell.openExternal(url).catch((err) => {
+            console.error('Failed to open external URL:', url, err);
+          });
+        } else {
+          console.log('Blocked will-navigate to unsupported protocol: ', url);
+          event.preventDefault();
+        }
+      }
+    } catch (e) {
+      console.error('Failed to parse navigation URL in will-navigate: ', url, e);
+      event.preventDefault();
+    }
+  });
+
+  // New-window requests (window.open / target="_blank"): only keep
+  // allowedHosts in-app; everything else opens in the default browser
+  win.webContents.setWindowOpenHandler(({url}) => {
+    console.log('windowOpenHandler: ', url);
+    try {
+      const parsedUrl = new URL(url);
+      const host = parsedUrl.hostname;
+      const protocol = parsedUrl.protocol;
+
+      if (allowedHosts.has(host)) {
+        // Load the URL in the existing window instead of opening a new one
+        // action: 'deny' prevents the new window creation
+        win.loadURL(url);
+        return { action: 'deny' };
+      }
+
+      // Only open well-formed http/https URLs externally
+      if (protocol === 'http:' || protocol === 'https:') {
+        shell.openExternal(url).catch((err) => {
+          console.error('Failed to open external URL:', url, err);
+        });
+      } else {
+        console.log('Blocked windowOpenHandler for unsupported protocol: ', url);
+      }
+    } catch (e) {
+      console.error('Failed to parse URL in windowOpenHandler: ', url, e);
+      // On parse failure, do not open externally
+    }
+    return { action: 'deny' };
+  });
+
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.control && input.key.toLowerCase() === 'r') {
+      console.log('Pressed Control+R')
+      event.preventDefault()
+      win.loadURL(appURL);
+    }
+  })
+
+  win.webContents.on('did-finish-load', () => {
+    // Hide the sidebar menu
+    win.webContents.executeJavaScript(`
+      const sidemenu = document.getElementById('sidemenu');
+      const btn = document.getElementById('aichat-side-menu-button');
+      if (btn) {
+        btn.style.display = 'none';
+      }
+   `);
+    win.webContents.insertCSS(`
+      ::-webkit-scrollbar {
+        width: 5px;
+        height: 12px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 10px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #888;
+        border-radius: 10px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #555;
+      }
+    `);
+
+    if (isScreenshotMode) {
+      console.log('Screenshot mode: waiting 5 seconds for content to render...');
+      setTimeout(async () => {
+        try {
+          console.log('Capturing screenshot...');
+          const image = await win.capturePage();
+          fs.writeFileSync(screenshotPath, image.toPNG());
+          console.log(`Screenshot saved to ${screenshotPath}`);
+          app.quit();
+        } catch (error) {
+          console.error('Error capturing screenshot:', error);
+          app.exit(1);
+        }
+      }, 5000);
+    }
+  });
+
+  //win.webContents.openDevTools();
+}
+
+// Ensure we're a single instance app
+const firstInstance = app.requestSingleInstanceLock();
+
+if (!firstInstance) {
+  app.quit();
+} else {
+  app.on("second-instance", (event) => {
+    console.log("second-instance");
+
+    // Ensure the main window exists and is not destroyed before using it
+    if (!win || win.isDestroyed()) {
+      createWindow();
+      return;
+    }
+
+    if (win.isMinimized()) {
+      win.restore();
+    }
+
+    win.show();
+    win.focus();
+  });
+}
+
+function createAboutWindow() {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { x, y, width, height } = primaryDisplay.bounds;
+
+  const aboutWindow = new BrowserWindow({
+    width: 500,
+    height: 420,
+    x: x + ((width - 500) / 2),
+    y: y + ((height - 420) / 2),
+    title: 'About',
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+    modal: true,  // Make the About window modal
+    parent: win  // Set the main window as parent
+  });
+
+  aboutWindow.loadFile('./assets/html/about.html');
+  aboutWindow.removeMenu();
+
+  // Read version from package.json
+  const packageJson = JSON.parse(fs.readFileSync(join(__dirname, 'package.json')));
+  const appVersion = packageJson.version;
+  const appDescription = packageJson.description;
+  const appTitle = packageJson.title;
+  const appBugsUrl = packageJson.bugs.url;
+  const appHomePage = packageJson.homepage;
+  const appAuthor = packageJson.author;
+
+  // Send version to the About window
+  aboutWindow.webContents.on('did-finish-load', () => {
+    console.log("did-finish-load", appTitle);
+    aboutWindow.webContents.send('app-version', appVersion);
+    aboutWindow.webContents.send('app-description', appDescription);
+    aboutWindow.webContents.send('app-title', appTitle);
+    aboutWindow.webContents.send('app-bugs-url', appBugsUrl);
+    aboutWindow.webContents.send('app-homepage', appHomePage);
+    aboutWindow.webContents.send('app-author', appAuthor);
+  });
+  // Link clicks open new windows, let's force them to open links in
+  // the default browser
+  aboutWindow.webContents.setWindowOpenHandler(({url}) => {
+    console.log('windowOpenHandler: ', url);
+    shell.openExternal(url);
+    return { action: 'deny' }
+  });
+}
+
+ipcMain.on('get-app-metadata', (event) => {
+    const packageJson = JSON.parse(fs.readFileSync(join(__dirname, 'package.json')));
+    const appVersion = packageJson.version;
+    const appDescription = packageJson.description;
+    const appTitle = packageJson.title;
+    const appBugsUrl = packageJson.bugs.url;
+    const appHomePage = packageJson.homepage;
+    const appAuthor = packageJson.author;
+    event.sender.send('app-version', appVersion);
+    event.sender.send('app-description', appDescription);
+    event.sender.send('app-title', appTitle);
+    event.sender.send('app-bugs-url', appBugsUrl);
+    event.sender.send('app-homepage', appHomePage);
+    event.sender.send('app-author', appAuthor);
+});
+
+app.on('ready', () => {
+  console.log(`Electron Version: ${process.versions.electron}`);
+  console.log(`App Version: ${app.getVersion()}`);
+
+  if (!isScreenshotMode) {
+    tray = new Tray(icon);
+    // Ignore double click events for the tray icon
+    tray.setIgnoreDoubleClickEvents(true)
+    tray.on('click', () => {
+      console.log("AppIndicator clicked");
+      showOrHide();
+    });
+
+    // Ensure autostart is set properly at start
+    initializeAutostart();
+
+    const contextMenu = Menu.buildFromTemplate([
+      {
+        label: `Show/Hide Duck.ai`,
+        icon: icon,
+        click: () => {
+          showOrHide();
+        }
+      },
+      {
+        label: 'Autostart',
+        type: 'checkbox',
+        checked: autostart,
+        click: () => {
+          autostart = contextMenu.items[1].checked;
+          console.log("Autostart toggled: " + autostart);
+          handleAutoStartChange();
+          // We need to setContextMenu to get the state changed for checked
+          tray.setContextMenu(contextMenu);
+        }
+      },
+      { type: 'separator' },
+      { label: 'About',
+        click: () => {
+          console.log("About clicked");
+	  createAboutWindow();
+        }
+      },
+      { label: 'Quit',
+        click: () => {
+          console.log("Quit clicked, Exiting");
+          app.exit();
+        }
+      },
+    ]);
+
+    tray.setToolTip('Duck.ai');
+    tray.setContextMenu(contextMenu);
+  }
+
+  createWindow();
+});
+
+function showOrHide() {
+  console.log("showOrHide");
+  if (win.isVisible()) {
+    win.hide();
+  } else {
+    win.show();
+  }
+}
+
+app.on('window-all-closed', () => {
+  console.log("window-all-closed");
+  // Encerra o app quando todas as janelas forem fechadas (nao ha tray).
+  if (!tray) {
+    app.quit();
+  }
+});
+
+app.on('activate', () => {
+  console.log("ACTIVATE");
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
+});

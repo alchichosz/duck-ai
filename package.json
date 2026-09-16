@@ -1,0 +1,65 @@
+{
+  "name": "duck.ai",
+  "title": "Duck.ai Desktop",
+  "version": "1.0.0",
+  "description": "Unofficial Web app for DuckDuckGo's Duck.ai providing the desktop user experience you would expect on Ubuntu or any other Linux desktop.",
+  "main": "index.js",
+  "scripts": {
+    "start": "electron .",
+    "start-tray": "electron . --tray",
+    "build": "electron-builder --publish never",
+    "screenshot": "TEST_SCREENSHOT=1 electron ."
+  },
+  "build": {
+    "asar": false,
+    "appId": "com.github.kenvandine.duck.ai",
+    "productName": "Duck.ai",
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility",
+      "maintainer": "Ken VanDine <ken@kenvandine.com>",
+      "artifactName": "${name}_${version}_linux.${ext}",
+      "desktop": {
+        "entry": {
+          "Name": "Duck.ai",
+          "Comment": "Unofficial Web app for DuckDuckGo's Duck.ai",
+          "Categories": "Utility;Network;"
+        }
+      }
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ]
+    },
+    "extraFiles": [
+      "com.github.kenvandine.${name}.desktop"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kenvandine/duck-ai.git"
+  },
+  "author": "Ken VanDine",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/kenvandine/duck-ai/issues"
+  },
+  "homepage": "https://github.com/kenvandine/duck-ai#readme",
+  "devDependencies": {
+    "electron": "^40.10.2",
+    "electron-builder": "^26.15.3",
+    "electron-package": "^0.1.0"
+  }
+}
